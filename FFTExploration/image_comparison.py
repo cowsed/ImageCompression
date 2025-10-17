@@ -23,7 +23,9 @@ def _():
     from io import BytesIO
     import base64
     import matplotlib.pyplot as plt
-    return BytesIO, Generator, Image, List, Tuple, cv2, np, os, plt
+
+    import scipy
+    return BytesIO, Generator, Image, List, Tuple, cv2, np, os, plt, scipy
 
 
 @app.cell
@@ -52,16 +54,25 @@ def _(List, Tuple, np):
     class Format:
         def name() -> str:
             return "unnamed format"
-        def encode(image: np.ndarray, size: Tuple(int, int)) -> List[Packet]:
+        def encode(image: np.ndarray) -> List[Packet]:
             return []
 
-        def decode(packets: List[Packet], size: Tuple(int, int)) -> np.ndarray | None:
+        def decode(packets: List[Packet], size: Tuple[int, int]) -> np.ndarray | None:
             return []
     return Format, Packet
 
 
 @app.cell
-def _():
+def _(mo):
+    mo.md(
+        r"""
+    ## Metrics
+    need some way to determine if the image looks good
+
+    ### MSE
+    its like fine iguess, not how humans see it but whatevs
+    """
+    )
     return
 
 
@@ -70,7 +81,7 @@ def _(np):
     def mse_image(original: np.ndarray, compressed: np.ndarray):
 
         if original.shape != compressed.shape:
-            raise ValueError("Differently sized images. Try resizing before hand")
+            raise ValueError(f"Differently sized images {original.shape} vs {compressed.shape}. Try resizing before hand")
 
         squared_diffs = np.square(original - compressed)
         return np.mean(squared_diffs)
@@ -94,9 +105,17 @@ def _(Generator, Tuple, cv2, np, os):
 
 
 @app.cell
+def _(images_from_directory):
+    rit25 = list(images_from_directory('Datasets/RIT_IREC_FULL/'))
+    return (rit25,)
+
+
+@app.cell
 def _(mo):
     mo.md(
         r"""
+    # Encoders 
+    they encode and decode
     ## Silly JPEG Encoder
     just encodes the image as a jpeg, splits it into 256 byte packets and sends them all
     """
@@ -105,25 +124,19 @@ def _(mo):
 
 
 @app.cell
-def _(images_from_directory):
-    rit25 = list(images_from_directory('Datasets/RIT_IREC_FULL/'))
-    return (rit25,)
-
-
-@app.cell
 def _(BytesIO, Format, Image, LORA_MAX_PACKET, List, Packet, Tuple, np):
     class JPEGEncoder(Format):
         def __init__(self, quality):
-            self.quality = quality
+            self.quality = int(quality)
         def name(self) -> str:
             return f"JPEG Encoder Quality {self.quality}"
-        def encode(self, image: np.ndarray, size: Tuple[int, int]) -> List[Packet]:    
+        def encode(self, image: np.ndarray) -> List[Packet]:    
             byte_arr = BytesIO()
 
             img = Image.fromarray(image)
             img.save(byte_arr, format='JPEG', quality=self.quality)
-
             allbytes = byte_arr.getvalue()
+            print(f"{self.name()} {len(allbytes)} bytes")
             pacs = [allbytes[i:min(i+LORA_MAX_PACKET, len(allbytes))] for i in range(0, len(allbytes), LORA_MAX_PACKET)]
 
             return pacs
@@ -137,11 +150,22 @@ def _(BytesIO, Format, Image, LORA_MAX_PACKET, List, Packet, Tuple, np):
             image = Image.open(BytesIO(buf))
 
             return np.array(image)
+    return (JPEGEncoder,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+    ## Halfway Grayscale FFT Encoder
+    FFT that stuff, crop it, send it (somehow), uncrop and fill with zeros, IFFT it
+    """
+    )
     return
 
 
 @app.cell
-def _(Format, List, Packet, Tuple, cv2, np):
+def _(Format, List, Packet, Tuple, np):
     class GrayscaleFFTFloatEncoder(Format):
         # quality 1-100
         def __init__(self, quality):
@@ -154,7 +178,7 @@ def _(Format, List, Packet, Tuple, cv2, np):
             return f"Grayscale FFT Encoder Quality {self.quality}"
 
         def encode_to_fdomain(self, image: np.ndarray, size: Tuple[int, int]) -> np.ndarray:
-            img = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            img = image
 
             f_transform = np.fft.fft2(img)
             f_transform_shifted_init = np.fft.fftshift(f_transform)
@@ -169,10 +193,15 @@ def _(Format, List, Packet, Tuple, cv2, np):
             x_start = int(f_transform_shifted.shape[1]/2 - xlim)
 
             masked = f_transform_shifted[y_start:y_start+yextent, x_start:x_start+xextent]
+            mask_shape = masked.shape
+            print(f"{self.name()} Masked Size {mask_shape[0]}x{mask_shape[1]} complex,  {mask_shape[0]*mask_shape[1]*2*4} bytes")
 
             return masked;
 
-        def encode(self, image: np.ndarray, size: Tuple[int, int]) -> List[Packet]:
+        def encode(self, image: np.ndarray) -> List[Packet]:
+            size = image.shape
+            if len(image.shape) > 2:
+                raise ValueError("Only support one channel!")
             fdomain = self.encode_to_fdomain(image, size)
             return fdomain.reshape(-1)
     
@@ -217,21 +246,68 @@ def _(Format, List, Packet, Tuple, cv2, np):
 
 
 @app.cell
-def _():
+def _(mo):
+    mo.md(
+        r"""
+    ## Halfway Grayscale FFT Encoder
+    DCT that stuff, crop it, send it (somehow), uncrop and fill with zeros, IDCT it
+    """
+    )
     return
 
 
 @app.cell
-def _(mo, rit25):
+def _(Format, List, Packet, Tuple, np, scipy):
+    class GrayscaleDCTFloat(Format):
+        def __init__(self, quality):
+            self.quality = quality
+            self.value = self.quality / 100
+        def name(self):
+            return f"Grayscale DCT Float Quality {self.quality}"
+        def encode(self, image: np.ndarray) -> List[Packet]:
+            size = image.shape
+            if len(image.shape) > 2:
+                raise ValueError("Only support one channel!")
+            gray = image
+            dct = scipy.fft.dctn(gray)
+            mask_shape = (int( size[0] * self.value) ),  int( size[1] * self.value )
+            masked = dct[0:mask_shape[0], 0:mask_shape[1]]
+        
+            print(f"{self.name()} Masked Size {mask_shape[0]}x{mask_shape[1]} real, {mask_shape[0]*mask_shape[1]*4} bytes")
+            print(f"min: {masked.min()} max: {masked.max()}")
+            return masked
+        def decode(self, packets: List[Packet], size: Tuple[int, int]) -> np.ndarray:
+            d2 = packets
+            mask_shape = (int( size[0] * self.value) ),  int( size[1] * self.value )
+            dct = np.zeros(size)
+            dct[0:mask_shape[0], 0:mask_shape[1]] = d2
+            idct = scipy.fft.idctn(dct)
+            return idct
+    
+    return (GrayscaleDCTFloat,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""# Grayscale Encoder Playground""")
+    return
+
+
+@app.cell
+def _(GrayscaleDCTFloat, GrayscaleFFTFloatEncoder, JPEGEncoder, mo, rit25):
+    encoders = {"JPEG": JPEGEncoder, "GrayFFT": GrayscaleFFTFloatEncoder, "GrayDCT": GrayscaleDCTFloat}
+
     fft_quality_slider = mo.ui.slider(start=1, stop=99.9, step=0.1, label="Quality")
     image_selector = mo.ui.dropdown(options = {e[0]: e[1] for e in rit25}, value=rit25[0][0], label = "Image")
-    return fft_quality_slider, image_selector
+    enc_selector = mo.ui.multiselect(options = encoders, value=["JPEG", "GrayFFT", "GrayDCT"], label = "Encoders")
+
+    return enc_selector, fft_quality_slider, image_selector
 
 
 @app.cell
 def _(
-    GrayscaleFFTFloatEncoder,
     cv2,
+    enc_selector,
     fft_quality_slider,
     image_selector,
     mo,
@@ -241,55 +317,64 @@ def _(
     fig3 = plt.figure(figsize=(15, 8))
 
     img = cv2.resize(image_selector.value, (1200, 800), dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    gimg = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
     val = fft_quality_slider.value
+    selected_encs = enc_selector.value
 
-    enc = GrayscaleFFTFloatEncoder(val)
-    middle = enc.encode(img, img.shape)
-    img_back = enc.decode(middle, img.shape)
-    plt.subplot(131), plt.imshow(gimg, cmap='gray')
-    plt.title('Original Image'), plt.xticks([]), plt.yticks([])
+    def encoder_column(enc):
+        print(enc.name())
+    
+        middle = enc.encode(gray)
+        img_back = enc.decode(middle, gray.shape)
+    
+        
+        plt.subplot(311), plt.imshow(gray, cmap='gray')
+        plt.title('Original Image'), plt.xticks([]), plt.yticks([])
+    
+        plt.subplot(312), plt.imshow(img_back, cmap='gray')
+        plt.title('Reconstructed Image'), plt.xticks([]), plt.yticks([])
+    
+        plt.subplot(313), plt.imshow(gray - img_back, cmap='gray')
+        plt.title('Difference'), plt.xticks([]), plt.yticks([])
+    
+        mse = mse_image(gray, img_back)
+    
+        return mo.vstack([
+        
+            mo.md(enc.name()), 
+            mo.md(f"MSE: {mse}"),
 
-    plt.subplot(132), plt.imshow(img_back, cmap='gray')
-    plt.title('Reconstructed Image'), plt.xticks([]), plt.yticks([])
-
-    plt.subplot(133), plt.imshow(gimg - img_back, cmap='gray')
-    plt.title('Difference'), plt.xticks([]), plt.yticks([])
-
-    print(f"Compression Quality: {val}, MSE: {mse_image(gimg, img_back)}")
-
+            fig3
+        ])
+    
     mo.vstack([
-        mo.hstack([fft_quality_slider, image_selector]),
-        fig3
+        mo.hstack([fft_quality_slider, enc_selector, image_selector]),
+        mo.hstack(map(lambda etype : encoder_column(etype(fft_quality_slider.value)), selected_encs))
     ])
-
 
     return
 
 
 @app.cell
-def _(GrayscaleFFTFloatEncoder, cv2, mse_image, plt, rit25):
-    genc = GrayscaleFFTFloatEncoder(15)
+def _():
+    return
 
-    for entry in rit25[::1]:
-        test_img = test_img = cv2.resize(entry[1], (1200, 800), dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR)
 
-        gtest_img = cv2.cvtColor(test_img, cv2.COLOR_BGR2GRAY)
+@app.cell
+def _(np):
+    def visualize_dct(d):
+        d = np.log(abs(d).clip(0.1))
+        maxi, mini = d.max(), d.min()
+        d = 255*(d - mini)/(maxi-mini)
+        return d
+    return
 
-        enced = genc.encode(test_img, gtest_img.shape)
-        deced = genc.decode(enced, gtest_img.shape)
-    
-        mse = mse_image(gtest_img, deced)
-        print(f"{entry[0]} Dims: {gtest_img.shape}, MSE: {mse}")
-    
-        diff = gtest_img - deced
-        fig2 = plt.figure(figsize=(14,16))
-        plt.subplot(131), plt.imshow(gtest_img, cmap="gray")
-        plt.subplot(132), plt.imshow(deced, cmap="grey")
-        plt.subplot(133), plt.imshow(diff, cmap="grey")
-        plt.show()
+
+@app.cell
+def _(mo):
+    val_slider = mo.ui.slider(start = 1, stop = 99.99, label = "quality")
     return
 
 
