@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "unknown"
+__generated_with = "0.17.0"
 app = marimo.App()
 
 
@@ -125,9 +125,9 @@ def _(
     print("orig: ",mask.shape, "new: ", (int(xlim*2), int(ylim*2)))
 
     mo.vstack([
-    crop_slider,
-    fig
-              ])
+        crop_slider,
+        fig
+    ])
     return
 
 
