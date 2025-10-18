@@ -12,7 +12,7 @@ def _(mo):
     - Run Length Encoding individual Packets
         - if shorter packets decode better, this could help there
         - 
-    - 
+    -
     """
     )
     return
@@ -400,7 +400,7 @@ def _(Format, np):
             r = image[:,:,0]
             g = image[:,:,1]
             b = image[:,:,2]
-            print("r shape", r.shape)
+
             renc = self.grayscale_encoder.encode(r)
             genc = self.grayscale_encoder.encode(g)
             benc = self.grayscale_encoder.encode(b)
@@ -419,29 +419,82 @@ def _(Format, np):
 
 
 @app.cell
+def _(Format, cv2, np):
+    class YCbCrFromGrayscale(Format):
+        def __init__(self, one_channel_encoder, Yquality, CbCrQuality):
+            self.Yquality = Yquality
+            self.CbCrQuality = CbCrQuality
+            self.brightness_encoder = one_channel_encoder(Yquality)
+            self.cbcr_encoder = one_channel_encoder(CbCrQuality)
+        def name(self):
+            return f"YCrYCb via Y {self.brightness_encoder.name()} and CrCb {self.cbcr_encoder.name()}"
+        def encode(self, image_rgb: np.ndarray):
+            image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2YCR_CB)
+        
+            if len(image.shape) != 3 or image.shape[2] !=3:
+                raise ValueError("I require 3 channel color images")
+            y = image[:,:,0]
+            cr = image[:,:,1]
+            cb = image[:,:,2]
+            print("YCrCb shape", image.shape)
+
+            yenc = self.brightness_encoder.encode(y)
+            crenc = self.cbcr_encoder.encode(cr)
+            cbenc = self.cbcr_encoder.encode(cb)
+            return yenc, crenc, cbenc
+
+        def decode(self, packets, size):
+            yenc, crenc, cbenc = packets
+
+            y = self.brightness_encoder.decode(yenc, size[0:2])
+            cr = self.cbcr_encoder.decode(crenc, size[0:2])
+            cb = self.cbcr_encoder.decode(cbenc, size[0:2])
+
+            print("y size", y.shape)
+            combined = np.stack([y,np.zeros_like(cr),np.zeros_like(cb)], axis=-1)
+            print("combined shape", combined.shape)
+            combined_rgb = cv2.cvtColor(combined.astype(np.float32), cv2.COLOR_YCR_CB2RGB)
+            return combined_rgb
+        
+    return (YCbCrFromGrayscale,)
+
+
+@app.cell
 def _(
     GrayscaleDCTFloat,
     GrayscaleFFTFloatEncoder,
     JPEGEncoder,
     RGBFromGrayscale,
+    YCbCrFromGrayscale,
     mo,
     rit25,
 ):
-    col_encoders = {"JPEG": JPEGEncoder, 
-                "RGBFFT": lambda quality : RGBFromGrayscale(GrayscaleFFTFloatEncoder, quality), 
-                "RGBDCT": lambda quality : RGBFromGrayscale(GrayscaleDCTFloat, quality)
+    col_encoders = {
+                "JPEG": lambda yqual, chrqual : JPEGEncoder(yqual), 
+                "RGBFFT": lambda yqual, chrqual : RGBFromGrayscale(GrayscaleFFTFloatEncoder, yqual), 
+                "RGBDCT": lambda yqual, chrqual : RGBFromGrayscale(GrayscaleDCTFloat, yqual),
+                "YCRCBFFT": lambda yqual, chrqual : YCbCrFromGrayscale(GrayscaleFFTFloatEncoder, yqual, chrqual), 
+                "YCRCBDCT": lambda yqual, chrqual : YCbCrFromGrayscale(GrayscaleDCTFloat, yqual, chrqual)
                }
 
 
-    col_fft_quality_slider = mo.ui.slider(start=1, stop=99.9, step=0.1, label="Quality")
-    col_image_selector = mo.ui.dropdown(options = {e[0]: e[1] for e in rit25}, value=rit25[0][0], label = "Image")
-    col_enc_selector = mo.ui.multiselect(options = col_encoders, value=["JPEG", "RGBFFT", "RGBDCT"], label = "Encoders")
 
-    return col_enc_selector, col_fft_quality_slider, col_image_selector
+    col_fft_quality_slider = mo.ui.slider(start=1, stop=99.9, step=0.1, label="Quality")
+    col_chr_quality_slider = mo.ui.slider(start=1, stop=99.9, step=0.1, label="Chrominance Quality")
+    col_image_selector = mo.ui.dropdown(options = {e[0]: e[1] for e in rit25}, value=rit25[0][0], label = "Image")
+    col_enc_selector = mo.ui.multiselect(options = col_encoders, value=["JPEG", "RGBDCT", "YCRCBDCT"], label = "Encoders")
+
+    return (
+        col_chr_quality_slider,
+        col_enc_selector,
+        col_fft_quality_slider,
+        col_image_selector,
+    )
 
 
 @app.cell
 def _(
+    col_chr_quality_slider,
     col_enc_selector,
     col_fft_quality_slider,
     col_image_selector,
@@ -476,18 +529,16 @@ def _(
         mse = mse_image(col_img, img_back)
         ssim = metrics.structural_similarity(col_img, img_back, full=True, data_range = img_back.max() - img_back.min(), channel_axis=2)
     
-        return mo.vstack([
-        
+        return mo.vstack([        
             mo.md(enc.name()), 
             mo.md(f"MSE (inf to 0 best): {mse}"),
             mo.md(f"SSIM (-1 to 1 best): {ssim[0]}"),
-
             fig4
         ])
     
     mo.vstack([
-        mo.hstack([col_fft_quality_slider, col_enc_selector, col_image_selector]),
-        mo.hstack(map(lambda etype : col_encoder_column(etype(col_fft_quality_slider.value)), col_enc_selector.value))
+        mo.hstack([col_fft_quality_slider, col_chr_quality_slider, col_enc_selector, col_image_selector]),
+        mo.hstack(map(lambda etype : col_encoder_column(etype(col_fft_quality_slider.value, col_chr_quality_slider.value)), col_enc_selector.value))
     ])
 
     return
