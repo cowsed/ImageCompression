@@ -5,6 +5,20 @@ app = marimo.App(width="medium")
 
 
 @app.cell
+def _(mo):
+    mo.md(
+        r"""
+    More things to consider
+    - Run Length Encoding individual Packets
+        - if shorter packets decode better, this could help there
+        - 
+    - 
+    """
+    )
+    return
+
+
+@app.cell
 def _():
     import marimo as mo
     return (mo,)
@@ -24,8 +38,21 @@ def _():
     import base64
     import matplotlib.pyplot as plt
 
+    from skimage import metrics
     import scipy
-    return BytesIO, Generator, Image, List, Tuple, cv2, np, os, plt, scipy
+    return (
+        BytesIO,
+        Generator,
+        Image,
+        List,
+        Tuple,
+        cv2,
+        metrics,
+        np,
+        os,
+        plt,
+        scipy,
+    )
 
 
 @app.cell
@@ -310,6 +337,7 @@ def _(
     enc_selector,
     fft_quality_slider,
     image_selector,
+    metrics,
     mo,
     mse_image,
     plt,
@@ -340,12 +368,13 @@ def _(
         plt.title('Difference'), plt.xticks([]), plt.yticks([])
     
         mse = mse_image(gray, img_back)
-    
+        ssim = metrics.structural_similarity(gray, img_back, full=True, data_range = img_back.max() - img_back.min(), channel_axis=1)
+
         return mo.vstack([
         
             mo.md(enc.name()), 
-            mo.md(f"MSE: {mse}"),
-
+            mo.md(f"MSE (0 best): {mse}"),
+            mo.md(f"SSIM (1 best, -1 worst): {ssim[0]}"),
             fig3
         ])
     
@@ -358,7 +387,109 @@ def _(
 
 
 @app.cell
-def _():
+def _(Format, np):
+    class RGBFromGrayscale(Format):
+        def __init__(self, grayscale_encoder, quality):
+            self.quality = quality
+            self.grayscale_encoder = grayscale_encoder(quality)
+        def name(self):
+            return f"RGB via 1D {self.grayscale_encoder.name()}"
+        def encode(self, image: np.ndarray):
+            if len(image.shape) != 3 or image.shape[2] !=3:
+                raise ValueError("I require 3 channel color images")
+            r = image[:,:,0]
+            g = image[:,:,1]
+            b = image[:,:,2]
+            print("r shape", r.shape)
+            renc = self.grayscale_encoder.encode(r)
+            genc = self.grayscale_encoder.encode(g)
+            benc = self.grayscale_encoder.encode(b)
+            return renc, genc, benc
+        def decode(self, packets, size):
+            renc,genc,benc = packets
+            print(renc.shape)
+            r = self.grayscale_encoder.decode(renc, size[0:2]).astype(int)
+            g = self.grayscale_encoder.decode(genc, size[0:2]).astype(int)
+            b = self.grayscale_encoder.decode(benc, size[0:2]).astype(int)
+            combined = np.stack([r,g,b], axis=-1)
+            print("combined shape", combined.shape)
+            return combined
+        
+    return (RGBFromGrayscale,)
+
+
+@app.cell
+def _(
+    GrayscaleDCTFloat,
+    GrayscaleFFTFloatEncoder,
+    JPEGEncoder,
+    RGBFromGrayscale,
+    mo,
+    rit25,
+):
+    col_encoders = {"JPEG": JPEGEncoder, 
+                "RGBFFT": lambda quality : RGBFromGrayscale(GrayscaleFFTFloatEncoder, quality), 
+                "RGBDCT": lambda quality : RGBFromGrayscale(GrayscaleDCTFloat, quality)
+               }
+
+
+    col_fft_quality_slider = mo.ui.slider(start=1, stop=99.9, step=0.1, label="Quality")
+    col_image_selector = mo.ui.dropdown(options = {e[0]: e[1] for e in rit25}, value=rit25[0][0], label = "Image")
+    col_enc_selector = mo.ui.multiselect(options = col_encoders, value=["JPEG", "RGBFFT", "RGBDCT"], label = "Encoders")
+
+    return col_enc_selector, col_fft_quality_slider, col_image_selector
+
+
+@app.cell
+def _(
+    col_enc_selector,
+    col_fft_quality_slider,
+    col_image_selector,
+    cv2,
+    metrics,
+    mo,
+    mse_image,
+    np,
+    plt,
+):
+    fig4 = plt.figure(figsize=(15, 8))
+
+    col_img = cv2.resize(col_image_selector.value, (1200, 800), dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR)
+
+
+    def col_encoder_column(enc):
+        print(enc.name())
+    
+        middle = enc.encode(col_img)
+        img_back = enc.decode(middle, col_img.shape)
+    
+        
+        plt.subplot(311), plt.imshow(col_img)
+        plt.title('Original Image'), plt.xticks([]), plt.yticks([])
+    
+        plt.subplot(312), plt.imshow(img_back)
+        plt.title('Reconstructed Image'), plt.xticks([]), plt.yticks([])
+    
+        plt.subplot(313), plt.imshow(np.abs(col_img - img_back))
+        plt.title('Difference'), plt.xticks([]), plt.yticks([])
+    
+        mse = mse_image(col_img, img_back)
+        ssim = metrics.structural_similarity(col_img, img_back, full=True, data_range = img_back.max() - img_back.min(), channel_axis=2)
+    
+        return mo.vstack([
+        
+            mo.md(enc.name()), 
+            mo.md(f"MSE (inf to 0 best): {mse}"),
+            mo.md(f"SSIM (-1 to 1 best): {ssim[0]}"),
+
+            fig4
+        ])
+    
+    mo.vstack([
+        mo.hstack([col_fft_quality_slider, col_enc_selector, col_image_selector]),
+        mo.hstack(map(lambda etype : col_encoder_column(etype(col_fft_quality_slider.value)), col_enc_selector.value))
+    ])
+
     return
 
 
