@@ -12,7 +12,10 @@ def _(mo):
     - Run Length Encoding individual Packets
         - if shorter packets decode better, this could help there
         - 
-    -
+    - Tiled DCT
+      - kinda like what jpeg does, do dcts on subchunks
+      - kinda undoes some of our goals of loading whole image
+      - but if few enough subchunks, could still be good
     """
     )
     return
@@ -74,19 +77,22 @@ def _():
     return (LORA_MAX_PACKET,)
 
 
-@app.cell
-def _(List, Tuple, np):
+app._unparsable_cell(
+    r"""
     type Packet = bytearray
 
     class Format:
         def name() -> str:
-            return "unnamed format"
-        def encode(image: np.ndarray) -> List[Packet]:
+            return \"unnamed format\"
+        # return packets and byte estimate
+        def encode(image: np.ndarray) -> List[Packet], int:
             return []
 
         def decode(packets: List[Packet], size: Tuple[int, int]) -> np.ndarray | None:
             return []
-    return Format, Packet
+    """,
+    name="_"
+)
 
 
 @app.cell
@@ -166,7 +172,7 @@ def _(BytesIO, Format, Image, LORA_MAX_PACKET, List, Packet, Tuple, np):
             print(f"{self.name()} {len(allbytes)} bytes")
             pacs = [allbytes[i:min(i+LORA_MAX_PACKET, len(allbytes))] for i in range(0, len(allbytes), LORA_MAX_PACKET)]
 
-            return pacs
+            return pacs, len(allbytes)
 
         def decode(self, packets: List[Packet], size: Tuple[int, int]) -> np.ndarray | None:
             buf = bytearray()
@@ -213,7 +219,7 @@ def _(Format, List, Packet, Tuple, np):
 
             ylim = int(size[0]/2 * self.value)
             xlim = int(size[1]/2 * self.value)
-        
+
             yextent, xextent = int(ylim * 2), int(xlim * 2)
 
             y_start = int(f_transform_shifted.shape[0]/2 - ylim)
@@ -223,15 +229,15 @@ def _(Format, List, Packet, Tuple, np):
             mask_shape = masked.shape
             print(f"{self.name()} Masked Size {mask_shape[0]}x{mask_shape[1]} complex,  {mask_shape[0]*mask_shape[1]*2*4} bytes")
 
-            return masked;
+            return masked
 
         def encode(self, image: np.ndarray) -> List[Packet]:
             size = image.shape
             if len(image.shape) > 2:
                 raise ValueError("Only support one channel!")
             fdomain = self.encode_to_fdomain(image, size)
-            return fdomain.reshape(-1)
-    
+            return fdomain.reshape(-1), fdomain.shape[0] * fdomain.shape[1] * 2 * 4
+
         def decode_from_fdomain(self, fdomain: np.ndarray, size: Tuple[int, int]) -> np.ndarray:
             ylim = int(size[0]/2 * self.value)
             xlim = int(size[1]/2 * self.value)
@@ -240,12 +246,12 @@ def _(Format, List, Packet, Tuple, np):
             x_start = int(size[1]/2 - xlim)
             yextent, xextent = int(ylim * 2), int(xlim * 2)
 
-        
+
             f_transform = np.zeros(size[0:2], dtype=np.complex128)
             f_transform[y_start:y_start+yextent, x_start:x_start+xextent] = fdomain
-        
+
             f_transform_back = f_transform
-        
+
 
             # Perform 2D Inverse FFT
             # np.fft.ifftshift shifts the zero-frequency component back to the top-left
@@ -260,15 +266,15 @@ def _(Format, List, Packet, Tuple, np):
             d1 = packets
             ylim = int(size[0]/2 * self.value)
             xlim = int(size[1]/2 * self.value)
-        
+
             yextent, xextent = int(ylim * 2), int(xlim * 2)
             fdomain_shape = (yextent, xextent)
 
             fdomain = d1.reshape(fdomain_shape)
-        
+
             return self.decode_from_fdomain(fdomain, size)
-        
-        
+
+
     return (GrayscaleFFTFloatEncoder,)
 
 
@@ -299,10 +305,11 @@ def _(Format, List, Packet, Tuple, np, scipy):
             dct = scipy.fft.dctn(gray)
             mask_shape = (int( size[0] * self.value) ),  int( size[1] * self.value )
             masked = dct[0:mask_shape[0], 0:mask_shape[1]]
-        
+
             print(f"{self.name()} Masked Size {mask_shape[0]}x{mask_shape[1]} real, {mask_shape[0]*mask_shape[1]*4} bytes")
             print(f"min: {masked.min()} max: {masked.max()}")
-            return masked
+            return masked, masked.shape[0] * masked.shape[1] * 4
+
         def decode(self, packets: List[Packet], size: Tuple[int, int]) -> np.ndarray:
             d2 = packets
             mask_shape = (int( size[0] * self.value) ),  int( size[1] * self.value )
@@ -310,7 +317,7 @@ def _(Format, List, Packet, Tuple, np, scipy):
             dct[0:mask_shape[0], 0:mask_shape[1]] = d2
             idct = scipy.fft.idctn(dct)
             return idct
-    
+
     return (GrayscaleDCTFloat,)
 
 
@@ -324,10 +331,9 @@ def _(mo):
 def _(GrayscaleDCTFloat, GrayscaleFFTFloatEncoder, JPEGEncoder, mo, rit25):
     encoders = {"JPEG": JPEGEncoder, "GrayFFT": GrayscaleFFTFloatEncoder, "GrayDCT": GrayscaleDCTFloat}
 
-    fft_quality_slider = mo.ui.slider(start=1, stop=99.9, step=0.1, label="Quality")
+    fft_quality_slider = mo.ui.number(start=1, stop=99.9, step=0.1, label="Quality")
     image_selector = mo.ui.dropdown(options = {e[0]: e[1] for e in rit25}, value=rit25[0][0], label = "Image")
     enc_selector = mo.ui.multiselect(options = encoders, value=["JPEG", "GrayFFT", "GrayDCT"], label = "Encoders")
-
     return enc_selector, fft_quality_slider, image_selector
 
 
@@ -353,36 +359,36 @@ def _(
 
     def encoder_column(enc):
         print(enc.name())
-    
-        middle = enc.encode(gray)
-        img_back = enc.decode(middle, gray.shape)
-    
-        
+
+        middle, size_est  = enc.encode(gray)
+        img_back= enc.decode(middle, gray.shape)
+
+
         plt.subplot(311), plt.imshow(gray, cmap='gray')
         plt.title('Original Image'), plt.xticks([]), plt.yticks([])
-    
+
         plt.subplot(312), plt.imshow(img_back, cmap='gray')
         plt.title('Reconstructed Image'), plt.xticks([]), plt.yticks([])
-    
+
         plt.subplot(313), plt.imshow(gray - img_back, cmap='gray')
         plt.title('Difference'), plt.xticks([]), plt.yticks([])
-    
+
         mse = mse_image(gray, img_back)
         ssim = metrics.structural_similarity(gray, img_back, full=True, data_range = img_back.max() - img_back.min(), channel_axis=1)
 
         return mo.vstack([
-        
+
             mo.md(enc.name()), 
             mo.md(f"MSE (0 best): {mse}"),
             mo.md(f"SSIM (1 best, -1 worst): {ssim[0]}"),
+            mo.md(f"Byte Est: {size_est}"),
             fig3
         ])
-    
+
     mo.vstack([
         mo.hstack([fft_quality_slider, enc_selector, image_selector]),
         mo.hstack(map(lambda etype : encoder_column(etype(fft_quality_slider.value)), selected_encs))
     ])
-
     return
 
 
@@ -401,10 +407,11 @@ def _(Format, np):
             g = image[:,:,1]
             b = image[:,:,2]
 
-            renc = self.grayscale_encoder.encode(r)
-            genc = self.grayscale_encoder.encode(g)
-            benc = self.grayscale_encoder.encode(b)
-            return renc, genc, benc
+            renc, s1 = self.grayscale_encoder.encode(r)
+            genc, s2 = self.grayscale_encoder.encode(g)
+            benc, s3 = self.grayscale_encoder.encode(b)
+
+            return (renc, genc, benc), s1 + s2 + s3
         def decode(self, packets, size):
             renc,genc,benc = packets
             print(renc.shape)
@@ -414,7 +421,7 @@ def _(Format, np):
             combined = np.stack([r,g,b], axis=-1)
             print("combined shape", combined.shape)
             return combined
-        
+
     return (RGBFromGrayscale,)
 
 
@@ -430,7 +437,7 @@ def _(Format, cv2, np):
             return f"YCrYCb via Y {self.brightness_encoder.name()} and CrCb {self.cbcr_encoder.name()}"
         def encode(self, image_rgb: np.ndarray):
             image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2YCR_CB)
-        
+
             if len(image.shape) != 3 or image.shape[2] !=3:
                 raise ValueError("I require 3 channel color images")
             y = image[:,:,0]
@@ -438,25 +445,88 @@ def _(Format, cv2, np):
             cb = image[:,:,2]
             print("YCrCb shape", image.shape)
 
-            yenc = self.brightness_encoder.encode(y)
-            crenc = self.cbcr_encoder.encode(cr)
-            cbenc = self.cbcr_encoder.encode(cb)
-            return yenc, crenc, cbenc
+            yenc, s1 = self.brightness_encoder.encode(y)
+            crenc, s2 = self.cbcr_encoder.encode(cr)
+            cbenc, s3 = self.cbcr_encoder.encode(cb)
+
+            return (yenc- 128, crenc- 128, cbenc- 128), s1 + s2 + s3
 
         def decode(self, packets, size):
             yenc, crenc, cbenc = packets
 
-            y = self.brightness_encoder.decode(yenc, size[0:2])
-            cr = self.cbcr_encoder.decode(crenc, size[0:2])
-            cb = self.cbcr_encoder.decode(cbenc, size[0:2])
+            y = self.brightness_encoder.decode(yenc+128, size[0:2])
+            cr = self.cbcr_encoder.decode(crenc+128, size[0:2])
+            cb = self.cbcr_encoder.decode(cbenc+128, size[0:2])
 
             print("y size", y.shape)
-            combined = np.stack([y,np.zeros_like(cr),np.zeros_like(cb)], axis=-1)
+            combined = np.stack([y,cr, cb], axis=-1)
             print("combined shape", combined.shape)
-            combined_rgb = cv2.cvtColor(combined.astype(np.float32), cv2.COLOR_YCR_CB2RGB)
+            combined_rgb = cv2.cvtColor(combined.astype(np.uint8), cv2.COLOR_YCR_CB2RGB).astype(int)
             return combined_rgb
-        
+
     return (YCbCrFromGrayscale,)
+
+
+@app.cell
+def _(Format, Tuple, cv2, np, scipy):
+    def crop_dct(dct_2d: np.ndarray, quality: float) -> (np.ndarray, Tuple[int, int]):
+        # returns downsampled version, original size
+        r, c = int(dct_2d.shape[0]*quality), int(dct_2d.shape[1]*quality)
+        cropped_dct = dct_2d[0:r, 0:c]
+        return cropped_dct, dct_2d.shape
+
+    def uncrop_dct(cropped_dct: np.ndarray, original_size: Tuple[int, int]) -> (np.ndarray):
+        print("cropped_shape", cropped_dct.shape, "og", original_size)
+        shape = cropped_dct.shape
+        og_dct = np.zeros(original_size)
+        print("Shape", shape)
+        og_dct[0:shape[0] , 0:shape[1]] = cropped_dct
+        return og_dct
+
+    class KnockOffGJpegButNotTiledAndNotCenteredAtZero(Format):
+        def __init__(self, Yqual, Cqual, Cdivision):
+            self.Yqual = Yqual/100
+            self.Cqual = Cqual/100
+            self.CDivision = Cdivision
+        def name(self) -> str:
+            return f"KnockOffJpeg: YQ: {self.Yqual:.2}, CQ: {self.Cqual:.2}, CDiv: {self.CDivision}"
+        def encode(self, image_rgb: np.ndarray):
+            ycbcr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2YCR_CB)
+
+            chrominance_shape = (ycbcr.shape[1]//self.CDivision, ycbcr.shape[0]//self.CDivision)
+            Y = ycbcr[:,:,0]
+            Cr = cv2.resize(ycbcr[:,:,1], chrominance_shape, dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR)
+            Cb = cv2.resize(ycbcr[:,:,2], chrominance_shape, dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR)
+
+            print("Y Shape", Y.shape, "Cr shape", Cr.shape)
+
+            Ydct, Ydct_og_size = crop_dct(scipy.fft.dctn(Y), self.Yqual)
+            Crdct, Crdct_og_size = crop_dct(scipy.fft.dctn(Cr), self.Cqual)
+            Cbdct, Cbdct_og_size = crop_dct(scipy.fft.dctn(Cb), self.Cqual)
+            num_floats = (Ydct.shape[0] * Ydct.shape[1] + Crdct.shape[0] * Crdct.shape[1] + Cbdct.shape[0] * Cbdct.shape[1])
+            return (Ydct, Crdct, Cbdct), num_floats * 4
+
+        def decode(self, packets, og_size):
+            print("Og", og_size)
+            Ydct, Crdct, Cbdct = packets
+            cr_og_size = (og_size[0]//self.CDivision, og_size[1]//self.CDivision)
+            print("Cr Og", cr_og_size)
+
+            iY =  scipy.fft.idctn(uncrop_dct(Ydct, og_size[:2]))
+            iCr = scipy.fft.idctn(uncrop_dct(Crdct, cr_og_size))
+            iCb = scipy.fft.idctn(uncrop_dct(Cbdct, cr_og_size))
+
+            iCrb = cv2.resize(iCr, og_size[:2][::-1], dst=None, fx=None, fy=None, interpolation=cv2.INTER_NEAREST)
+            iCbb = cv2.resize(iCb, og_size[:2][::-1], dst=None, fx=None, fy=None, interpolation=cv2.INTER_NEAREST)
+            print("iY Shape", iY.shape, "Cr shape", iCrb.shape)
+
+            img_ycrcb = np.stack([iY, iCrb, iCbb], axis=-1)
+
+            print(img_ycrcb.shape)
+            img_rgb = cv2.cvtColor(img_ycrcb.astype(np.uint8), cv2.COLOR_YCR_CB2RGB)
+            return img_rgb
+
+    return (KnockOffGJpegButNotTiledAndNotCenteredAtZero,)
 
 
 @app.cell
@@ -464,28 +534,31 @@ def _(
     GrayscaleDCTFloat,
     GrayscaleFFTFloatEncoder,
     JPEGEncoder,
+    KnockOffGJpegButNotTiledAndNotCenteredAtZero,
     RGBFromGrayscale,
     YCbCrFromGrayscale,
     mo,
     rit25,
 ):
     col_encoders = {
-                "JPEG": lambda yqual, chrqual : JPEGEncoder(yqual), 
-                "RGBFFT": lambda yqual, chrqual : RGBFromGrayscale(GrayscaleFFTFloatEncoder, yqual), 
-                "RGBDCT": lambda yqual, chrqual : RGBFromGrayscale(GrayscaleDCTFloat, yqual),
-                "YCRCBFFT": lambda yqual, chrqual : YCbCrFromGrayscale(GrayscaleFFTFloatEncoder, yqual, chrqual), 
-                "YCRCBDCT": lambda yqual, chrqual : YCbCrFromGrayscale(GrayscaleDCTFloat, yqual, chrqual)
+                "JPEG": lambda yqual, chrqual, _ : JPEGEncoder(yqual), 
+                "RGBFFT": lambda yqual, chrqual, _ : RGBFromGrayscale(GrayscaleFFTFloatEncoder, yqual), 
+                "RGBDCT": lambda yqual, chrqual,_ : RGBFromGrayscale(GrayscaleDCTFloat, yqual),
+                "YCRCBFFT": lambda yqual, chrqual,_ : YCbCrFromGrayscale(GrayscaleFFTFloatEncoder, yqual, chrqual), 
+                "YCRCBDCT": lambda yqual, chrqual,_ : YCbCrFromGrayscale(GrayscaleDCTFloat, yqual, chrqual),
+                "NonTileJPEG": lambda yqual, chrqual, subdiv : KnockOffGJpegButNotTiledAndNotCenteredAtZero(yqual, chrqual, subdiv)
                }
 
 
 
-    col_fft_quality_slider = mo.ui.slider(start=1, stop=99.9, step=0.1, label="Quality")
-    col_chr_quality_slider = mo.ui.slider(start=1, stop=99.9, step=0.1, label="Chrominance Quality")
+    col_fft_quality_slider = mo.ui.number(start=1, stop=99.9, step=0.1, label="Quality")
+    col_chr_quality_slider = mo.ui.number(start=1, stop=99.9, step=0.1, label="Chrominance Quality")
+    col_chr_subdiv_slider = mo.ui.number(value=4, start=1, stop=400, step=1, label="Chrominance Subdiv")
     col_image_selector = mo.ui.dropdown(options = {e[0]: e[1] for e in rit25}, value=rit25[0][0], label = "Image")
-    col_enc_selector = mo.ui.multiselect(options = col_encoders, value=["JPEG", "RGBDCT", "YCRCBDCT"], label = "Encoders")
-
+    col_enc_selector = mo.ui.multiselect(options = col_encoders, value=["JPEG", "RGBDCT", "NonTileJPEG"], label = "Encoders")
     return (
         col_chr_quality_slider,
+        col_chr_subdiv_slider,
         col_enc_selector,
         col_fft_quality_slider,
         col_image_selector,
@@ -495,6 +568,7 @@ def _(
 @app.cell
 def _(
     col_chr_quality_slider,
+    col_chr_subdiv_slider,
     col_enc_selector,
     col_fft_quality_slider,
     col_image_selector,
@@ -507,40 +581,44 @@ def _(
 ):
     fig4 = plt.figure(figsize=(15, 8))
 
-    col_img = cv2.resize(col_image_selector.value, (1200, 800), dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR)
+    col_img = cv2.resize(col_image_selector.value, (1280, 720), dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR)
 
 
     def col_encoder_column(enc):
         print(enc.name())
-    
-        middle = enc.encode(col_img)
+
+        middle, size = enc.encode(col_img)
         img_back = enc.decode(middle, col_img.shape)
-    
-        
+        print("ds", img_back.dtype, img_back.shape)
+
+
         plt.subplot(311), plt.imshow(col_img)
         plt.title('Original Image'), plt.xticks([]), plt.yticks([])
-    
+
         plt.subplot(312), plt.imshow(img_back)
         plt.title('Reconstructed Image'), plt.xticks([]), plt.yticks([])
-    
+
         plt.subplot(313), plt.imshow(np.abs(col_img - img_back))
         plt.title('Difference'), plt.xticks([]), plt.yticks([])
-    
+
         mse = mse_image(col_img, img_back)
         ssim = metrics.structural_similarity(col_img, img_back, full=True, data_range = img_back.max() - img_back.min(), channel_axis=2)
-    
+
         return mo.vstack([        
             mo.md(enc.name()), 
             mo.md(f"MSE (inf to 0 best): {mse}"),
             mo.md(f"SSIM (-1 to 1 best): {ssim[0]}"),
+            mo.md(f"Bytes: {size}"),
             fig4
         ])
-    
-    mo.vstack([
-        mo.hstack([col_fft_quality_slider, col_chr_quality_slider, col_enc_selector, col_image_selector]),
-        mo.hstack(map(lambda etype : col_encoder_column(etype(col_fft_quality_slider.value, col_chr_quality_slider.value)), col_enc_selector.value))
-    ])
 
+    mo.vstack([
+        mo.hstack([col_fft_quality_slider, col_chr_quality_slider, col_chr_subdiv_slider, col_enc_selector, col_image_selector]),
+        mo.hstack(map(
+            lambda etype : col_encoder_column(
+                etype(float(col_fft_quality_slider.value), float(col_chr_quality_slider.value), col_chr_subdiv_slider.value)
+            ), col_enc_selector.value))
+    ])
     return
 
 
