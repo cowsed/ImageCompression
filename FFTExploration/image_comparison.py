@@ -48,6 +48,7 @@ def _():
     import scipy
     import pandas as pd
     import itertools
+    import math
     return (
         BytesIO,
         Generator,
@@ -55,6 +56,7 @@ def _():
         List,
         Tuple,
         cv2,
+        math,
         metrics,
         np,
         os,
@@ -323,75 +325,6 @@ def _(Format, List, Packet, Tuple, np, scipy):
 
 
 @app.cell
-def _(mo):
-    mo.md(r"""# Grayscale Encoder Playground""")
-    return
-
-
-@app.cell
-def _(GrayscaleDCTFloat, GrayscaleFFTFloatEncoder, JPEGEncoder, mo, rit25):
-    encoders = {"JPEG": JPEGEncoder, "GrayFFT": GrayscaleFFTFloatEncoder, "GrayDCT": GrayscaleDCTFloat}
-
-    fft_quality_slider = mo.ui.number(start=1, stop=99.9, step=0.1, label="Quality")
-    image_selector = mo.ui.dropdown(options = {e[0]: e[1] for e in rit25}, value=rit25[0][0], label = "Image")
-    enc_selector = mo.ui.multiselect(options = encoders, value=["JPEG", "GrayFFT", "GrayDCT"], label = "Encoders")
-    return enc_selector, fft_quality_slider, image_selector
-
-
-@app.cell
-def _(
-    cv2,
-    enc_selector,
-    fft_quality_slider,
-    image_selector,
-    metrics,
-    mo,
-    mse_image,
-    plt,
-):
-    fig3 = plt.figure(figsize=(15, 8))
-
-    img = cv2.resize(image_selector.value, (1200, 800), dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-
-    val = fft_quality_slider.value
-    selected_encs = enc_selector.value
-
-    def encoder_column(enc):
-
-        middle, size_est  = enc.encode(gray)
-        img_back= enc.decode(middle, gray.shape)
-
-
-        plt.subplot(311), plt.imshow(gray, cmap='gray')
-        plt.title('Original Image'), plt.xticks([]), plt.yticks([])
-
-        plt.subplot(312), plt.imshow(img_back, cmap='gray')
-        plt.title('Reconstructed Image'), plt.xticks([]), plt.yticks([])
-
-        plt.subplot(313), plt.imshow(gray - img_back, cmap='gray')
-        plt.title('Difference'), plt.xticks([]), plt.yticks([])
-
-        mse = mse_image(gray, img_back)
-        ssim = metrics.structural_similarity(gray, img_back, full=True, data_range = img_back.max() - img_back.min(), channel_axis=1)
-
-        return mo.vstack([
-            mo.md(enc.name()), 
-            mo.md(f"MSE (0 best): {mse}"),
-            mo.md(f"SSIM (1 best, -1 worst): {ssim[0]}"),
-            mo.md(f"Byte Est: {size_est}"),
-            fig3
-        ])
-
-    mo.vstack([
-        mo.hstack([fft_quality_slider, enc_selector, image_selector]),
-        mo.hstack(map(lambda etype : encoder_column(etype(fft_quality_slider.value)), selected_encs))
-    ])
-    return
-
-
-@app.cell
 def _(Format, np):
     class RGBFromGrayscale(Format):
         def __init__(self, grayscale_encoder, quality):
@@ -514,6 +447,57 @@ def _(Format, Tuple, cv2, np, scipy):
             return img_rgb
 
     return (KnockOffGJpegButNotTiledAndNotCenteredAtZero,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""# Lora Airtime Calculator""")
+    return
+
+
+@app.cell
+def _(math, namedtuple):
+    LoraSettings = namedtuple("LoraSettings", ["SF", "BW", "CR", "PreambleSize", "CrcOn", "ImplicitHeader", "LDR"])
+    # Source: https://github.com/ifTNT/lora-air-time
+
+    def n_symbol(payload_len: int, settings: LoraSettings):
+        payload_bits = 8 * payload_len
+        payload_bits -= settings.SF * 4
+        payload_bits += 8
+        if settings.CrcOn:
+            payload_bits+=16
+
+        if settings.ImplicitHeader:
+            payload_bits+=16
+        payload_bits = max(payload_bits, 0)
+    
+        bits_per_symbol = settings.SF
+        if settings.LDR:
+            bits_per_symbol -= 2
+        payload_symbol = math.ceil(payload_bits / 4 / bits_per_symbol) * settings.CR;
+        payload_symbol += 8;
+
+        preamble_symbols = settings.PreambleSize+4.25 
+        return payload_symbol, preamble_symbols 
+
+    def airtime(payload_len: int, settings: LoraSettings) -> float:
+        T_s = (2**settings.SF)/settings.BW
+        n_sym, n_pre = n_symbol(payload_len, settings)
+
+        return T_s * (n_sym + n_pre)
+    return LoraSettings, airtime
+
+
+@app.cell
+def _(LoraSettings, airtime):
+    airtime(10, LoraSettings(7, 500, 6, 8, False, False, False))
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""# Playground""")
+    return
 
 
 @app.cell
@@ -665,7 +649,7 @@ def _(
 
     rgb_dct_tests = [(image_name, image, "RGBDCT", lambda qual : RGBFromGrayscale(GrayscaleDCTFloat, qual), (int((1.2**qual)/4),)) for (image_name, image) in dataset for qual in range(8, 26, 2)]
 
-    all_tests = jpeg_tests + fake_jpeg_tests + rgb_dct_tests
+    all_tests = [] # jpeg_tests + fake_jpeg_tests + rgb_dct_tests
 
     for (image_name, image, encoder_id, encoder_factory, encoder_args) in all_tests[:0]:
         print(image_name, encoder_id, encoder_args)
@@ -676,12 +660,6 @@ def _(
 
         
     return dataset, results
-
-
-@app.cell
-def _(results):
-    results[0]
-    return
 
 
 @app.cell
