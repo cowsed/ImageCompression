@@ -128,9 +128,9 @@ def _():
 
 @app.cell
 def _(Cb, Cqual, Cr, Y, Yqual, crop_dct, scipy):
-    Ydct, Ydct_og_size = crop_dct(scipy.fft.dctn((Y-128)/128.0), Yqual)
-    Crdct, Crdct_og_size = crop_dct(scipy.fft.dctn((Cr-128)/128.0), Cqual)
-    Cbdct, Cbdct_og_size = crop_dct(scipy.fft.dctn((Cb-128)/128.0), Cqual)
+    Ydct, Ydct_og_size = crop_dct(scipy.fft.dctn((Y)), Yqual)
+    Crdct, Crdct_og_size = crop_dct(scipy.fft.dctn((Cr)), Cqual)
+    Cbdct, Cbdct_og_size = crop_dct(scipy.fft.dctn((Cb)), Cqual)
     return Cbdct, Cbdct_og_size, Crdct, Ydct, Ydct_og_size
 
 
