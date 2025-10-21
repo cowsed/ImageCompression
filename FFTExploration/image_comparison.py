@@ -11,11 +11,14 @@ def _(mo):
     More things to consider
     - Run Length Encoding individual Packets
         - if shorter packets decode better, this could help there
-        - 
+    - For mmaking packets, rays from the origin
+      - encode that signal, based on vis, seem compressible (pretty much just a downard slope with noise)
+      - 
     - Tiled DCT
       - kinda like what jpeg does, do dcts on subchunks
       - kinda undoes some of our goals of loading whole image
       - but if few enough subchunks, could still be good
+  
     """
     )
     return
@@ -523,6 +526,7 @@ def _(
     YCbCrFromGrayscale,
     mo,
     rit25,
+    wenet,
 ):
     col_encoders = {
                 "JPEG": lambda yqual, chrqual, _ : JPEGEncoder(yqual), 
@@ -536,9 +540,9 @@ def _(
 
 
     col_fft_quality_slider = mo.ui.number(start=1, stop=99.9, step=0.1, label="Quality")
-    col_chr_quality_slider = mo.ui.number(start=1.0, stop=99.9, step=0.1, label="Chrominance Quality")
+    col_chr_quality_slider = mo.ui.number(value = .2, start=.10, stop=99.9, step=0.1, label="Chrominance Quality")
     col_chr_subdiv_slider = mo.ui.number(value=4, start=1, stop=400, step=1, label="Chrominance Subdiv")
-    col_image_selector = mo.ui.dropdown(options = {e[0]: e[1] for e in rit25}, value=rit25[0][0], label = "Image")
+    col_image_selector = mo.ui.dropdown(options = {e[0]: e[1] for e in rit25 + wenet}, value=rit25[0][0], label = "Image")
     col_enc_selector = mo.ui.multiselect(options = col_encoders, value=["JPEG", "RGBDCT", "NonTileJPEG"], label = "Encoders")
     return (
         col_chr_quality_slider,
@@ -573,10 +577,10 @@ def _(
         img_back = enc.decode(middle, col_img.shape)
 
 
-        plt.subplot(311), plt.imshow(col_img)
+        plt.subplot(312), plt.imshow(col_img)
         plt.title('Original Image'), plt.xticks([]), plt.yticks([])
 
-        plt.subplot(312), plt.imshow(img_back)
+        plt.subplot(311), plt.imshow(img_back)
         plt.title('Reconstructed Image'), plt.xticks([]), plt.yticks([])
 
         plt.subplot(313), plt.imshow(np.abs(col_img - img_back))
@@ -663,7 +667,7 @@ def _(
 
     all_tests = jpeg_tests + fake_jpeg_tests + rgb_dct_tests
 
-    for (image_name, image, encoder_id, encoder_factory, encoder_args) in all_tests:
+    for (image_name, image, encoder_id, encoder_factory, encoder_args) in all_tests[:0]:
         print(image_name, encoder_id, encoder_args)
         base_image = cv2.resize(image, (1280, 720), dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR)
         encoder = encoder_factory(*encoder_args)

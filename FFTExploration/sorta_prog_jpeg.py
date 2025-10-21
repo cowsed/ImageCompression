@@ -205,7 +205,7 @@ def _(
 def _(cv2, iCbb, iCrb, iY, np, plt, test_img):
     img_ycrcb = np.stack([iY, iCrb, iCbb], axis=-1)
     print(img_ycrcb.shape)
-    img_rgb = cv2.cvtColor(img_ycrcb.astype(np.uint8), cv2.COLOR_YCR_CB2RGB)
+    img_rgb = cv2.cvtColor(np.clip(img_ycrcb, 0, 255).astype(np.uint8), cv2.COLOR_YCR_CB2RGB)
 
     plt.figure(figsize=(16,4)), plt.xticks([]), plt.yticks([])
     plt.title("Before and After")
