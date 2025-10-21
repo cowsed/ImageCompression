@@ -49,6 +49,7 @@ def _():
     import pandas as pd
     import itertools
     import math
+    import tempfile
     return (
         BytesIO,
         Generator,
@@ -63,6 +64,7 @@ def _():
         pd,
         plt,
         scipy,
+        tempfile,
     )
 
 
@@ -450,6 +452,55 @@ def _(Format, Tuple, cv2, np, scipy):
 
 
 @app.cell
+def _(Format, List, Packet, cv2, os, tempfile):
+    class SSDVEncoder(Format):
+        def __init__(self, quality, max_packet_size, callsign, image_id):
+            if (max_packet_size > 256):
+                raise ValueError("Packet size too large (max 256)")
+            self.qual = quality
+            self.max_packet_size = max_packet_size
+            self.callsign = callsign
+            self.image_id = image_id % 256
+        def name(self):
+            return f"SSDV Encoder: Quality {self.qual}"
+        def encode(self, image_rgb) -> List[Packet]:
+            if image_rgb.shape[0] % 16 != 0 or image_rgb.shape[1] % 16 != 0:
+                raise ValueError("Dimensions must be multiples of 16")
+            fname = tempfile.mktemp()+".jpg"
+            bin_fname = tempfile.mktemp()
+            cv2.imwrite(fname, image_rgb)
+            cmd = f"ssdv -e -n -q {self.qual} -c {self.callsign} -i {self.image_id} -l {self.max_packet_size} {fname} {bin_fname} 2>/dev/null"
+            ret = os.system(cmd)
+            if ret != 0:
+                raise RuntimeError("Couldnt encode with SSDV")
+            pacs = []
+            size = 0
+            with open(bin_fname, 'rb') as f:
+                while True:
+                    chunk = f.read(self.max_packet_size)
+                    if not chunk: 
+                        break
+                    size+=len(chunk)
+                    pacs.append(chunk)
+            return pacs, size
+        def decode(self, packets, og_size):
+            bin_fname = tempfile.mktemp()
+            fname = tempfile.mktemp()
+            with open(bin_fname, 'wb') as f:
+                for packet in packets:
+                    f.write(packet)
+            cmd = f"ssdv -d -l {self.max_packet_size} {bin_fname} {fname} 2>/dev/null"
+            ret = os.system(cmd)
+            if ret != 0:
+                raise RuntimeError("Couldnt decode with SSDV")
+            img = cv2.imread(fname)
+            return img
+
+        
+    return (SSDVEncoder,)
+
+
+@app.cell
 def _(mo):
     mo.md(r"""# Lora Airtime Calculator""")
     return
@@ -507,13 +558,15 @@ def _(
     JPEGEncoder,
     KnockOffGJpegButNotTiledAndNotCenteredAtZero,
     RGBFromGrayscale,
+    SSDVEncoder,
     YCbCrFromGrayscale,
     mo,
     rit25,
     wenet,
 ):
     col_encoders = {
-                "JPEG": lambda yqual, chrqual, _ : JPEGEncoder(yqual), 
+                "JPEG": lambda yqual, _, _2 : JPEGEncoder(yqual), 
+                "SSDV": lambda yqual, _, _2 : SSDVEncoder(int(yqual * 0.07), 64, 'KC1TPR', 1),
                 "RGBFFT": lambda yqual, chrqual, _ : RGBFromGrayscale(GrayscaleFFTFloatEncoder, yqual), 
                 "RGBDCT": lambda yqual, chrqual,_ : RGBFromGrayscale(GrayscaleDCTFloat, yqual),
                 "YCRCBFFT": lambda yqual, chrqual,_ : YCbCrFromGrayscale(GrayscaleFFTFloatEncoder, yqual, chrqual), 
@@ -527,7 +580,7 @@ def _(
     col_chr_quality_slider = mo.ui.number(value = .2, start=.10, stop=99.9, step=0.1, label="Chrominance Quality")
     col_chr_subdiv_slider = mo.ui.number(value=4, start=1, stop=400, step=1, label="Chrominance Subdiv")
     col_image_selector = mo.ui.dropdown(options = {e[0]: e[1] for e in rit25 + wenet}, value=rit25[0][0], label = "Image")
-    col_enc_selector = mo.ui.multiselect(options = col_encoders, value=["JPEG", "RGBDCT", "NonTileJPEG"], label = "Encoders")
+    col_enc_selector = mo.ui.multiselect(options = col_encoders, value=["JPEG", "SSDV", "NonTileJPEG"], label = "Encoders")
     return (
         col_chr_quality_slider,
         col_chr_subdiv_slider,
@@ -628,10 +681,9 @@ def _(metrics, mse_image, namedtuple):
 
 @app.cell
 def _(
-    GrayscaleDCTFloat,
     JPEGEncoder,
     KnockOffGJpegButNotTiledAndNotCenteredAtZero,
-    RGBFromGrayscale,
+    SSDVEncoder,
     cv2,
     rit25,
     test_encoder,
@@ -647,9 +699,9 @@ def _(
 
     fake_jpeg_tests = [(image_name, image, "YChrDctNonTile", KnockOffGJpegButNotTiledAndNotCenteredAtZero, (int((1.2**qual)/4),int((1.2**qual)/4), 8)) for (image_name, image) in dataset for qual in range(7, 26, 2)]
 
-    rgb_dct_tests = [(image_name, image, "RGBDCT", lambda qual : RGBFromGrayscale(GrayscaleDCTFloat, qual), (int((1.2**qual)/4),)) for (image_name, image) in dataset for qual in range(8, 26, 2)]
+    ssdv_tests = [(image_name, image, "SSDV", lambda qual : SSDVEncoder(qual, 255, "KC1TPR", 0), (qual,)) for (image_name, image) in dataset for qual in [0, 15, 29, 43, 58, 72, 86, 100]]
 
-    all_tests = [] # jpeg_tests + fake_jpeg_tests + rgb_dct_tests
+    all_tests = jpeg_tests + fake_jpeg_tests + ssdv_tests
 
     for (image_name, image, encoder_id, encoder_factory, encoder_args) in all_tests[:0]:
         print(image_name, encoder_id, encoder_args)
@@ -658,7 +710,7 @@ def _(
         result = test_encoder(encoder, base_image)
         results.append((image_name, result.image, encoder_id, encoder_args, encoder.name(), result.bytes, result.mse, result.ssim))
 
-        
+
     return dataset, results
 
 
@@ -669,13 +721,19 @@ def _(pd, results):
 
 
 @app.cell
-def _(df, plt):
-    fig, axs = plt.subplots(2, figsize=(8,6))
-    # ax.set_xscale("log")
+def _(df):
+    average_df = df[['encoder_type', 'encoder_args', 'encoder_name', 'num_bytes', 'mse', 'ssim']].groupby(['encoder_type', 'encoder_args', 'encoder_name']).mean()
+    average_df
+    return (average_df,)
 
-    for n, grp in df.groupby('encoder_type'):
-        axs[0].scatter(grp['num_bytes'], grp["ssim"], marker='o', label=n)
-        axs[1].scatter(grp['num_bytes'], grp["mse"], marker='+', label=n)
+
+@app.cell
+def _(average_df, plt):
+    fig, axs = plt.subplots(2, figsize=(8,6))
+
+    for n, grp in average_df.reset_index().groupby('encoder_type'):
+        axs[0].plot(grp['num_bytes'], grp["ssim"], marker='o', label=n)
+        axs[1].plot(grp['num_bytes'], grp["mse"], marker='+', label=n)
 
     axs[0].legend(title="Encoders")
     axs[1].legend(title="Encoders")
