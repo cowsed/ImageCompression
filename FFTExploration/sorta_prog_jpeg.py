@@ -52,9 +52,8 @@ def _(images_from_directory):
 
 
 @app.cell
-def _(cv2, test_images):
-    test_img = cv2.resize(test_images[8][1], (1280, 720), dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR)
-
+def _(cv2, np, test_images):
+    test_img = cv2.resize(test_images[8][1], (1280, 720), dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR).astype(np.float32)/256
     return (test_img,)
 
 
@@ -66,8 +65,7 @@ def _(plt, test_img):
 
 @app.cell
 def _(cv2, test_img):
-    ycbcr = cv2.cvtColor(test_img, cv2.COLOR_RGB2YCR_CB)
-
+    ycbcr = cv2.cvtColor(test_img-.5, cv2.COLOR_RGB2YCR_CB)
     return (ycbcr,)
 
 
@@ -79,7 +77,6 @@ def _(cv2, ycbcr):
     Y = ycbcr[:,:,0]
     Cr = cv2.resize(ycbcr[:,:,1], chrominance_shape, dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR)
     Cb = cv2.resize(ycbcr[:,:,2], chrominance_shape, dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR)
-
     return Cb, Cr, Y
 
 
@@ -127,10 +124,10 @@ def _():
 
 
 @app.cell
-def _(Cb, Cqual, Cr, Y, Yqual, crop_dct, scipy):
-    Ydct, Ydct_og_size = crop_dct(scipy.fft.dctn((Y)), Yqual)
-    Crdct, Crdct_og_size = crop_dct(scipy.fft.dctn((Cr)), Cqual)
-    Cbdct, Cbdct_og_size = crop_dct(scipy.fft.dctn((Cb)), Cqual)
+def _(Cb, Cqual, Cr, Y, Yqual, crop_dct, np, scipy):
+    Ydct, Ydct_og_size = crop_dct(scipy.fft.dctn(Y).astype(np.float32), Yqual)
+    Crdct, Crdct_og_size = crop_dct(scipy.fft.dctn(Cr).astype(np.float32), Cqual)
+    Cbdct, Cbdct_og_size = crop_dct(scipy.fft.dctn(Cb).astype(np.float32), Cqual)
     return Cbdct, Cbdct_og_size, Crdct, Ydct, Ydct_og_size
 
 
@@ -170,13 +167,14 @@ def _(
     Ydct,
     Ydct_og_size,
     cv2,
+    np,
     plt,
     scipy,
     uncrop_dct,
 ):
-    iY = (scipy.fft.idctn(uncrop_dct(Ydct, Ydct_og_size)))
-    iCr = (scipy.fft.idctn(uncrop_dct(Crdct, Cbdct_og_size)))
-    iCb = (scipy.fft.idctn(uncrop_dct(Cbdct, Cbdct_og_size)))
+    iY = (scipy.fft.idctn(uncrop_dct(Ydct.astype(np.float32), Ydct_og_size)))
+    iCr = (scipy.fft.idctn(uncrop_dct(Crdct.astype(np.float32), Cbdct_og_size)))
+    iCb = (scipy.fft.idctn(uncrop_dct(Cbdct.astype(np.float32), Cbdct_og_size)))
 
     print("uiy", iY.shape, Ydct_og_size, Cbdct_og_size)
 
@@ -197,20 +195,19 @@ def _(
     print(iCbb.shape)
 
     plt.show()
-
     return iCbb, iCrb, iY
 
 
 @app.cell
 def _(cv2, iCbb, iCrb, iY, np, plt, test_img):
-    img_ycrcb = np.stack([iY, iCrb, iCbb], axis=-1)
+    img_ycrcb = np.stack([iY, iCrb, iCbb], axis=-1).astype(np.float32)
     print(img_ycrcb.shape)
-    img_rgb = cv2.cvtColor(np.clip(img_ycrcb, 0, 255).astype(np.uint8), cv2.COLOR_YCR_CB2RGB)
+    img_rgb = cv2.cvtColor(img_ycrcb, cv2.COLOR_YCR_CB2RGB)+.5
 
     plt.figure(figsize=(16,4)), plt.xticks([]), plt.yticks([])
     plt.title("Before and After")
     plt.subplot(121), plt.imshow(test_img), plt.xticks([]), plt.yticks([])
-    plt.subplot(122), plt.imshow(img_rgb.astype(int)), plt.xticks([]), plt.yticks([])
+    plt.subplot(122), plt.imshow(np.clip(img_rgb, 0, 1.0)), plt.xticks([]), plt.yticks([])
 
     plt.show()
     return (img_rgb,)

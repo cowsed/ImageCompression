@@ -13,12 +13,12 @@ def _(mo):
         - if shorter packets decode better, this could help there
     - For mmaking packets, rays from the origin
       - encode that signal, based on vis, seem compressible (pretty much just a downard slope with noise)
-      - 
+
+
     - Tiled DCT
       - kinda like what jpeg does, do dcts on subchunks
       - kinda undoes some of our goals of loading whole image
       - but if few enough subchunks, could still be good
-  
     """
     )
     return
@@ -280,8 +280,6 @@ def _(Format, List, Packet, Tuple, np):
             fdomain = d1.reshape(fdomain_shape)
 
             return self.decode_from_fdomain(fdomain, size)
-
-
     return (GrayscaleFFTFloatEncoder,)
 
 
@@ -322,7 +320,6 @@ def _(Format, List, Packet, Tuple, np, scipy):
             dct[0:mask_shape[0], 0:mask_shape[1]] = d2
             idct = scipy.fft.idctn(dct)
             return idct
-
     return (GrayscaleDCTFloat,)
 
 
@@ -354,7 +351,6 @@ def _(Format, np):
             combined = np.stack([r,g,b], axis=-1)
 
             return combined
-
     return (RGBFromGrayscale,)
 
 
@@ -393,7 +389,6 @@ def _(Format, cv2, np):
             combined = np.stack([y,cr, cb], axis=-1)
             combined_rgb = cv2.cvtColor(combined.astype(np.uint8), cv2.COLOR_YCR_CB2RGB).astype(int)
             return np.clip(combined_rgb, 0, 255)
-
     return (YCbCrFromGrayscale,)
 
 
@@ -448,11 +443,90 @@ def _(Format, Tuple, cv2, np, scipy):
             img_rgb = cv2.cvtColor(np.clip(img_ycrcb, 0, 255).astype(np.uint8), cv2.COLOR_YCR_CB2RGB)
             return img_rgb
 
-    return (KnockOffGJpegButNotTiledAndNotCenteredAtZero,)
+
+
+    class KnockOffGJpegButNotTiledFloat(Format):
+        def __init__(self, Yqual, Cqual, Cdivision):
+            self.Yqual = Yqual/100
+            self.Cqual = Cqual/100 * Cdivision
+            self.CDivision = Cdivision
+        def name(self) -> str:
+            return f"KnockOffJpeg: YQ: {self.Yqual:.2}, CQ: {self.Cqual:.2}, CDiv: {self.CDivision}"
+        def encode(self, image_rgb: np.ndarray):
+            img_float = (image_rgb/255.0 - .5).astype(np.float32)
+            ycbcr = cv2.cvtColor(img_float, cv2.COLOR_RGB2YCR_CB)
+
+            chrominance_shape = (ycbcr.shape[1]//self.CDivision, ycbcr.shape[0]//self.CDivision)
+            Y = ycbcr[:,:,0]
+            Cr = cv2.resize(ycbcr[:,:,1], chrominance_shape, dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR)
+            Cb = cv2.resize(ycbcr[:,:,2], chrominance_shape, dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR)
+
+            Ydct, Ydct_og_size = crop_dct(scipy.fft.dctn(Y), self.Yqual)
+            Crdct, Crdct_og_size = crop_dct(scipy.fft.dctn(Cr), self.Cqual)
+            Cbdct, Cbdct_og_size = crop_dct(scipy.fft.dctn(Cb), self.Cqual)
+            num_floats = (Ydct.shape[0] * Ydct.shape[1] + Crdct.shape[0] * Crdct.shape[1] + Cbdct.shape[0] * Cbdct.shape[1])
+            return (Ydct, Crdct, Cbdct), num_floats * 4
+
+        def decode(self, packets, og_size):
+            Ydct, Crdct, Cbdct = packets
+            cr_og_size = (og_size[0]//self.CDivision, og_size[1]//self.CDivision)
+
+            iY =  scipy.fft.idctn(uncrop_dct(Ydct, og_size[:2]))
+            iCr = scipy.fft.idctn(uncrop_dct(Crdct, cr_og_size))
+            iCb = scipy.fft.idctn(uncrop_dct(Cbdct, cr_og_size))
+
+            iCrb = cv2.resize(iCr, og_size[:2][::-1], dst=None, fx=None, fy=None, interpolation=cv2.INTER_NEAREST)
+            iCbb = cv2.resize(iCb, og_size[:2][::-1], dst=None, fx=None, fy=None, interpolation=cv2.INTER_NEAREST)
+
+            img_ycrcb = np.stack([iY, iCrb, iCbb], axis=-1)
+
+            img_rgb = cv2.cvtColor(img_ycrcb.astype(np.float32), cv2.COLOR_YCR_CB2RGB)+.5
+        
+            return np.clip(img_rgb*255, 0, 255).astype(np.uint8)
+    return (
+        KnockOffGJpegButNotTiledAndNotCenteredAtZero,
+        KnockOffGJpegButNotTiledFloat,
+    )
 
 
 @app.cell
-def _(Format, List, Packet, cv2, os, tempfile):
+def _(List, Packet, Tuple, tempfile):
+    def to_packets_via_io_files(func_from_to_bin, file_extension, max_packet_size) -> Tuple[List[Packet], int]:
+        fname = tempfile.mktemp()+file_extension
+        bin_fname = tempfile.mktemp()
+        func_from_to_bin(fname, bin_fname)
+
+        pacs = []
+        size = 0
+        with open(bin_fname, 'rb') as f:
+            while True:
+                chunk = f.read(max_packet_size)
+                if not chunk: 
+                    break
+                size+=len(chunk)
+                pacs.append(chunk)
+        return pacs, size
+
+    def to_image_from_packets(convert_fn, packets):
+        bin_fname = tempfile.mktemp()
+        fname = tempfile.mktemp()
+        with open(bin_fname, 'wb') as f:
+            for packet in packets:
+                f.write(packet)
+        return convert_fn(bin_fname, fname)
+    return to_image_from_packets, to_packets_via_io_files
+
+
+@app.cell
+def _(
+    Format,
+    List,
+    Packet,
+    cv2,
+    os,
+    to_image_from_packets,
+    to_packets_via_io_files,
+):
     class SSDVEncoder(Format):
         def __init__(self, quality, max_packet_size, callsign, image_id):
             if (max_packet_size > 256):
@@ -466,38 +540,66 @@ def _(Format, List, Packet, cv2, os, tempfile):
         def encode(self, image_rgb) -> List[Packet]:
             if image_rgb.shape[0] % 16 != 0 or image_rgb.shape[1] % 16 != 0:
                 raise ValueError("Dimensions must be multiples of 16")
-            fname = tempfile.mktemp()+".jpg"
-            bin_fname = tempfile.mktemp()
-            cv2.imwrite(fname, image_rgb)
-            cmd = f"ssdv -e -n -q {self.qual} -c {self.callsign} -i {self.image_id} -l {self.max_packet_size} {fname} {bin_fname} 2>/dev/null"
-            ret = os.system(cmd)
-            if ret != 0:
-                raise RuntimeError("Couldnt encode with SSDV")
-            pacs = []
-            size = 0
-            with open(bin_fname, 'rb') as f:
-                while True:
-                    chunk = f.read(self.max_packet_size)
-                    if not chunk: 
-                        break
-                    size+=len(chunk)
-                    pacs.append(chunk)
-            return pacs, size
-        def decode(self, packets, og_size):
-            bin_fname = tempfile.mktemp()
-            fname = tempfile.mktemp()
-            with open(bin_fname, 'wb') as f:
-                for packet in packets:
-                    f.write(packet)
-            cmd = f"ssdv -d -l {self.max_packet_size} {bin_fname} {fname} 2>/dev/null"
-            ret = os.system(cmd)
-            if ret != 0:
-                raise RuntimeError("Couldnt decode with SSDV")
-            img = cv2.imread(fname)
-            return img
 
-        
+            def convert(fname, bin_fname):
+                cv2.imwrite(fname, image_rgb)
+                cmd = f"ssdv -e -n -q {self.qual} -c {self.callsign} -i {self.image_id} -l {self.max_packet_size} {fname} {bin_fname}"
+                ret = os.system(cmd)
+                if ret != 0:
+                    raise RuntimeError(f"Couldnt encode with SSDV: {ret}")
+            return to_packets_via_io_files(convert, ".jpg", self.max_packet_size)
+
+        def decode(self, packets, og_size):
+            def convert(bin_fname, fname):
+                cmd = f"ssdv -d -l {self.max_packet_size} {bin_fname} {fname} 2>/dev/null"
+                ret = os.system(cmd)
+                if ret != 0:
+                    raise RuntimeError("Couldnt decode with SSDV")
+                img = cv2.imread(fname)
+                return img
+
+            return to_image_from_packets(convert, packets)
     return (SSDVEncoder,)
+
+
+@app.cell
+def _(
+    Format,
+    List,
+    Packet,
+    cv2,
+    os,
+    to_image_from_packets,
+    to_packets_via_io_files,
+):
+    class JPEG2000EncoderNoPackets(Format):
+        def __init__(self, quality, max_packet_size):
+            self.qual = int(quality)
+            self.max_packet_size = max_packet_size
+        def name(self):
+            return f"JPEG2000 Encoder: Quality {self.qual}"
+        def encode(self, image_rgb) -> List[Packet]:
+
+            def convert(fname, bin_fname):
+                cv2.imwrite(fname, image_rgb)
+                cmd = f"convert {fname} -quality {self.qual} {bin_fname}.jp2 2>/dev/null && mv {bin_fname}.jp2 {bin_fname}"
+                ret = os.system(cmd)
+                if ret != 0:
+                    raise RuntimeError("Couldnt encode with JPEG2000")
+            return to_packets_via_io_files(convert, ".png", self.max_packet_size)
+
+        def decode(self, packets, og_size):
+            def convert(bin_fname, fname):
+                cmd = f"mv {bin_fname} {bin_fname}.jp2 && convert {bin_fname}.jp2 {fname}.jpg 2>/dev/null"
+                ret = os.system(cmd)
+                if ret != 0:
+                    raise RuntimeError("Couldnt decode with JPEG2000")
+
+                img = cv2.imread(f"{fname}.jpg")
+                return img
+
+            return to_image_from_packets(convert, packets)
+    return (JPEG2000EncoderNoPackets,)
 
 
 @app.cell
@@ -508,7 +610,7 @@ def _(mo):
 
 @app.cell
 def _(math, namedtuple):
-    LoraSettings = namedtuple("LoraSettings", ["SF", "BW", "CR", "PreambleSize", "CrcOn", "ImplicitHeader", "LDR"])
+    LoraSettings = namedtuple("LoraSettings", ["SF", "BW", "CR", "PreambleSize", "CrcOn", "ImplicitHeader", "LDR", "MaxSize"])
     # Source: https://github.com/ifTNT/lora-air-time
 
     def n_symbol(payload_len: int, settings: LoraSettings):
@@ -521,7 +623,7 @@ def _(math, namedtuple):
         if settings.ImplicitHeader:
             payload_bits+=16
         payload_bits = max(payload_bits, 0)
-    
+
         bits_per_symbol = settings.SF
         if settings.LDR:
             bits_per_symbol -= 2
@@ -531,17 +633,22 @@ def _(math, namedtuple):
         preamble_symbols = settings.PreambleSize+4.25 
         return payload_symbol, preamble_symbols 
 
-    def airtime(payload_len: int, settings: LoraSettings) -> float:
+    def airtimeOne(payload_len: int, settings: LoraSettings) -> float:
+        if payload_len > 255:
+            raise ValueError("Max packet size = 255")
         T_s = (2**settings.SF)/settings.BW
         n_sym, n_pre = n_symbol(payload_len, settings)
 
-        return T_s * (n_sym + n_pre)
+        return T_s * (n_sym + n_pre) / 1000
+    def airtime(payload_len: int, settings: LoraSettings) -> float:
+        repeated = payload_len // settings.MaxSize
+        remainder = payload_len % settings.MaxSize
+        return repeated * airtimeOne(settings.MaxSize, settings) + airtimeOne(remainder, settings)
     return LoraSettings, airtime
 
 
 @app.cell
-def _(LoraSettings, airtime):
-    airtime(10, LoraSettings(7, 500, 6, 8, False, False, False))
+def _():
     return
 
 
@@ -555,8 +662,11 @@ def _(mo):
 def _(
     GrayscaleDCTFloat,
     GrayscaleFFTFloatEncoder,
+    ICEREncoder,
+    JPEG2000EncoderNoPackets,
     JPEGEncoder,
     KnockOffGJpegButNotTiledAndNotCenteredAtZero,
+    KnockOffGJpegButNotTiledFloat,
     RGBFromGrayscale,
     SSDVEncoder,
     YCbCrFromGrayscale,
@@ -566,12 +676,15 @@ def _(
 ):
     col_encoders = {
                 "JPEG": lambda yqual, _, _2 : JPEGEncoder(yqual), 
+                "JPEG2000": lambda yqual, _, _2 : JPEG2000EncoderNoPackets(int(yqual**2), 255), 
                 "SSDV": lambda yqual, _, _2 : SSDVEncoder(int(yqual * 0.07), 64, 'KC1TPR', 1),
+                "ICER": lambda yqual, _, _2 : ICEREncoder(yqual * 1000),
                 "RGBFFT": lambda yqual, chrqual, _ : RGBFromGrayscale(GrayscaleFFTFloatEncoder, yqual), 
                 "RGBDCT": lambda yqual, chrqual,_ : RGBFromGrayscale(GrayscaleDCTFloat, yqual),
                 "YCRCBFFT": lambda yqual, chrqual,_ : YCbCrFromGrayscale(GrayscaleFFTFloatEncoder, yqual, chrqual), 
                 "YCRCBDCT": lambda yqual, chrqual,_ : YCbCrFromGrayscale(GrayscaleDCTFloat, yqual, chrqual),
-                "NonTileJPEG": lambda yqual, chrqual, subdiv : KnockOffGJpegButNotTiledAndNotCenteredAtZero(yqual, chrqual, subdiv)
+                "NonTileJPEG": lambda yqual, chrqual, subdiv : KnockOffGJpegButNotTiledAndNotCenteredAtZero(yqual, chrqual, subdiv),
+                "NonTileJPEGCentered": lambda yqual, chrqual, subdiv : KnockOffGJpegButNotTiledFloat(yqual, chrqual, subdiv)
                }
 
 
@@ -580,7 +693,7 @@ def _(
     col_chr_quality_slider = mo.ui.number(value = .2, start=.10, stop=99.9, step=0.1, label="Chrominance Quality")
     col_chr_subdiv_slider = mo.ui.number(value=4, start=1, stop=400, step=1, label="Chrominance Subdiv")
     col_image_selector = mo.ui.dropdown(options = {e[0]: e[1] for e in rit25 + wenet}, value=rit25[0][0], label = "Image")
-    col_enc_selector = mo.ui.multiselect(options = col_encoders, value=["JPEG", "SSDV", "NonTileJPEG"], label = "Encoders")
+    col_enc_selector = mo.ui.multiselect(options = col_encoders, value=["JPEG", "JPEG2000", "NonTileJPEGCentered"], label = "Encoders")
     return (
         col_chr_quality_slider,
         col_chr_subdiv_slider,
@@ -592,6 +705,8 @@ def _(
 
 @app.cell
 def _(
+    LoraSettings,
+    airtime,
     col_chr_quality_slider,
     col_chr_subdiv_slider,
     col_enc_selector,
@@ -628,9 +743,10 @@ def _(
 
         return mo.vstack([        
             mo.md(enc.name()), 
-            mo.md(f"MSE (inf to 0 best): {mse}"),
-            mo.md(f"SSIM (-1 to 1 best): {ssim[0]}"),
+            mo.md(f"MSE (inf to 0 best): {mse:.4}"),
+            mo.md(f"SSIM (-1 to 1 best): {ssim[0]:.4}"),
             mo.md(f"Bytes: {size}"),
+            mo.md(f"Airtime (s): {airtime(size, LoraSettings(7, 125, 6, 8, True, False, False, 255))}"),
             fig4
         ])
 
@@ -641,7 +757,7 @@ def _(
                 etype(float(col_fft_quality_slider.value), float(col_chr_quality_slider.value), col_chr_subdiv_slider.value)
             ), col_enc_selector.value))
     ])
-    return col_img, fig4
+    return
 
 
 @app.cell
@@ -668,19 +784,22 @@ def _():
 
 @app.cell
 def _(metrics, mse_image, namedtuple):
-    TestResult = namedtuple("TestResult", ["image", "bytes", "mse", "ssim"])
+    TestResult = namedtuple("TestResult", ["image", "bytes", "mse", "ssim", "psnr"])
     def test_encoder(encoder, original_image) -> TestResult:
         compressed_image, num_bytes = encoder.encode(original_image)
         decoded = encoder.decode(compressed_image, original_image.shape)
         mse = mse_image(original_image, decoded)
         ssim = metrics.structural_similarity(original_image, decoded, full=True, data_range = decoded.max() - decoded.min(), channel_axis=2)[0]
-        return TestResult(decoded, num_bytes, mse, ssim)
-    
+        psnr = metrics.peak_signal_noise_ratio(original_image, decoded, data_range = decoded.max() - decoded.min())
+
+
+        return TestResult(decoded, num_bytes, mse, ssim, psnr)
     return (test_encoder,)
 
 
 @app.cell
 def _(
+    JPEG2000EncoderNoPackets,
     JPEGEncoder,
     KnockOffGJpegButNotTiledAndNotCenteredAtZero,
     SSDVEncoder,
@@ -697,54 +816,65 @@ def _(
     dataset=rit25[:5] + wenet[:5]
     jpeg_tests = [(image_name, image, "JPEG", JPEGEncoder, (int((1.3**qual)/2),)) for (image_name, image) in dataset for qual in range(6, 21, 2)]
 
+    jpeg2000_tests = [(image_name, image, "JPEG2000", JPEG2000EncoderNoPackets, (int((1.25**qual)/2),255)) for (image_name, image) in dataset for qual in range(6, 21, 1)]
+
+
     fake_jpeg_tests = [(image_name, image, "YChrDctNonTile", KnockOffGJpegButNotTiledAndNotCenteredAtZero, (int((1.2**qual)/4),int((1.2**qual)/4), 8)) for (image_name, image) in dataset for qual in range(7, 26, 2)]
 
     ssdv_tests = [(image_name, image, "SSDV", lambda qual : SSDVEncoder(qual, 255, "KC1TPR", 0), (qual,)) for (image_name, image) in dataset for qual in [0, 15, 29, 43, 58, 72, 86, 100]]
 
-    all_tests = jpeg_tests + fake_jpeg_tests + ssdv_tests
+    all_tests = jpeg_tests + jpeg2000_tests + fake_jpeg_tests #+ ssdv_tests
 
-    for (image_name, image, encoder_id, encoder_factory, encoder_args) in all_tests[:0]:
+    for (image_name, image, encoder_id, encoder_factory, encoder_args) in all_tests:
         print(image_name, encoder_id, encoder_args)
         base_image = cv2.resize(image, (1280, 720), dst=None, fx=None, fy=None, interpolation=cv2.INTER_LINEAR)
         encoder = encoder_factory(*encoder_args)
         result = test_encoder(encoder, base_image)
-        results.append((image_name, result.image, encoder_id, encoder_args, encoder.name(), result.bytes, result.mse, result.ssim))
-
-
+        results.append((image_name, result.image, encoder_id, encoder_args, encoder.name(), result.bytes, result.mse, result.ssim, result.psnr))
     return dataset, results
 
 
 @app.cell
 def _(pd, results):
-    df = pd.DataFrame(results, columns=["image_name", "result_image", "encoder_type", "encoder_args", "encoder_name", "num_bytes", "mse", "ssim"])
+    df = pd.DataFrame(results, columns=["image_name", "result_image", "encoder_type", "encoder_args", "encoder_name", "num_bytes", "mse", "ssim", "psnr"])
+    # df["airtime"] = 
     return (df,)
 
 
 @app.cell
 def _(df):
-    average_df = df[['encoder_type', 'encoder_args', 'encoder_name', 'num_bytes', 'mse', 'ssim']].groupby(['encoder_type', 'encoder_args', 'encoder_name']).mean()
+    average_df = df[['encoder_type', 'encoder_args', 'encoder_name', 'num_bytes', 'mse', 'ssim', 'psnr']].groupby(['encoder_type', 'encoder_args', 'encoder_name']).mean()
     average_df
     return (average_df,)
 
 
 @app.cell
 def _(average_df, plt):
-    fig, axs = plt.subplots(2, figsize=(8,6))
+    fig, axs = plt.subplots(3, figsize=(8,8))
 
     for n, grp in average_df.reset_index().groupby('encoder_type'):
         axs[0].plot(grp['num_bytes'], grp["ssim"], marker='o', label=n)
         axs[1].plot(grp['num_bytes'], grp["mse"], marker='+', label=n)
+        axs[2].plot(grp['num_bytes'], grp["psnr"], marker='+', label=n)
 
     axs[0].legend(title="Encoders")
     axs[1].legend(title="Encoders")
+    axs[2].legend(title="Encoders")
 
     axs[0].set_xlabel("num bytes")
     axs[1].set_xlabel("num bytes")
+    axs[2].set_xlabel("num bytes")
+
     axs[0].set_ylabel("SSIM Score (1 good, -1 bad)")
     axs[1].set_ylabel("MSE (higher is worse)")
+    axs[2].set_ylabel("PSNR (higher is better)")
 
     axs[0].sharex(axs[1])
+    axs[1].sharex(axs[2])
     axs[0].set_xscale('log')
+
+    axs[2].set_xscale('log')
+
     plt.show()
     return
 
@@ -753,73 +883,13 @@ def _(average_df, plt):
 def _(dataset, mo):
     images_by_name = {e[0]:e[1] for e in dataset}
     result_image_picker = mo.ui.dropdown(options=images_by_name, value=dataset[0][0])
-    return (result_image_picker,)
+    return
 
 
 @app.cell
 def _(df, mo):
     encoder_results = {f"{row.encoder_type} - {row.encoder_args}": ind for ind, row in df.iterrows()}
     encoder_picker = mo.ui.multiselect(options=encoder_results, value=[])
-    return (encoder_picker,)
-
-
-@app.cell
-def _(encoder_picker):
-    encoder_picker
-    return
-
-
-@app.cell
-def _(
-    col_chr_quality_slider,
-    col_chr_subdiv_slider,
-    col_enc_selector,
-    col_fft_quality_slider,
-    col_img,
-    encoder_picker,
-    fig4,
-    metrics,
-    mo,
-    mse_image,
-    np,
-    plt,
-    result_image_picker,
-):
-    fig5 = plt.figure(figsize=(15, 8))
-
-
-    def col_encoder_column(enc):
-        middle, size = enc.encode(col_img)
-        img_back = enc.decode(middle, col_img.shape)
-
-
-        plt.subplot(311), plt.imshow(col_img)
-        plt.title('Original Image'), plt.xticks([]), plt.yticks([])
-
-        plt.subplot(312), plt.imshow(img_back)
-        plt.title('Reconstructed Image'), plt.xticks([]), plt.yticks([])
-
-        plt.subplot(313), plt.imshow(np.abs(col_img - img_back))
-        plt.title('Difference'), plt.xticks([]), plt.yticks([])
-
-        mse = mse_image(col_img, img_back)
-        ssim = metrics.structural_similarity(col_img, img_back, full=True, data_range = img_back.max() - img_back.min(), channel_axis=2)
-
-        return mo.vstack([        
-            mo.md(enc.name()), 
-            mo.md(f"MSE (inf to 0 best): {mse}"),
-            mo.md(f"SSIM (-1 to 1 best): {ssim[0]}"),
-            mo.md(f"Bytes: {size}"),
-            fig4
-        ])
-
-    mo.vstack([
-        mo.hstack([encoder_picker, result_image_picker]),
-        mo.hstack(map(
-            lambda etype : col_encoder_column(
-                etype(float(col_fft_quality_slider.value), float(col_chr_quality_slider.value), col_chr_subdiv_slider.value)
-            ), col_enc_selector.value))
-    ])
     return
 
 
